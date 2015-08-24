@@ -3,6 +3,7 @@
 <!-- Copyright Olli Etuaho 2013 -->
 <title>glbrush.js undo state visualization</title>
 <script type="text/javascript" src="../util2d.js"></script>
+<script type="text/javascript" src="../util2d_painting.js"></script>
 <script type="text/javascript" src="../utilgl.js"></script>
 <script type="text/javascript" src="../blit_shader.js"></script>
 <script type="text/javascript" src="../rasterize_shader.js"></script>
@@ -13,6 +14,7 @@
 <script type="text/javascript" src="../compositor.js"></script>
 <script type="text/javascript" src="../picture_event.js"></script>
 <script type="text/javascript" src="../rasterize.js"></script>
+<script type="text/javascript" src="../picture_update.js"></script>
 <script type="text/javascript" src="../picture_buffer.js"></script>
 <script type="text/javascript" src="../undo_state.js"></script>
 <script type="text/javascript" src="../picture.js"></script>
@@ -26,7 +28,7 @@ var runTest = function() {
     var bitmapScale = 1.0;
     var t = 0;
     var testPics = [];
-    var testPic = Picture.create(0, null, w, w, bitmapScale, [pictureMode]);
+    var testPic = Picture.create(0, null, new Rect(0, w, 0, w), bitmapScale, [pictureMode]);
     testPic.addBuffer(0, [255, 255, 255, 255], false);
     var flow = 0.8;
     var opacity = 1.0;
