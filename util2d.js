@@ -2,6 +2,14 @@
  * Copyright Olli Etuaho 2012-2014.
  */
 
+// This file contains following utilities:
+// cssUtil: Utilities for working with CSS
+// colorUtil: Utilities for working with RGB colors represented as arrays of numbers, including blending
+// Vec2: A class for storing a two-dimensional vector.
+// AffineTransform: A scale/translate transform.
+// Rect: A class for storing a two-dimensional rectangle.
+// canvasUtil: Utilities for drawing to a 2D canvas.
+
 'use strict';
 
 var cssUtil = {
@@ -36,9 +44,6 @@ var colorUtil = {
     premultiply: null,
     blend: null,
     serializeRGB: null,
-    nBlends: null,
-    approximateAlphaForNBlends: null,
-    alphaForNBlends: null,
     differentColor: null,
     blendWithFunction: null,
     blendMultiply: null,
@@ -136,101 +141,10 @@ colorUtil.blend = function(dstRGBA, srcRGBA) {
 /**
  * Serialize an RGB value.
  * @param {Array.<number>|Uint8Array} RGB RGB value.
- * @return {string} Serialized representation of the value.
+ * @return {Array} Copy of the value suitable for adding to JSON.
  */
 colorUtil.serializeRGB = function(RGB) {
-    return RGB[0] + ' ' + RGB[1] + ' ' + RGB[2];
-};
-
-/**
- * Serialize an RGBA value.
- * @param {Array.<number>|Uint8Array} RGBA RGBA value.
- * @return {string} Serialized representation of the value.
- */
-colorUtil.serializeRGBA = function(RGBA) {
-    return RGBA[0] + ' ' + RGBA[1] + ' ' + RGBA[2] + ' ' + RGBA[3];
-};
-
-/**
- * Calculate the resulting alpha value from blending a given alpha value with
- * itself n times.
- * @param {number} alpha The alpha value to blend with itself, between 0 and 1.
- * @param {number} n Amount of times to blend.
- * @return {number} The resulting alpha value.
- */
-colorUtil.nBlends = function(alpha, n) {
-    if (n < 1) {
-        return alpha * n;
-    }
-    if (alpha === 1.0) {
-        return 1.0;
-    }
-    var i = 1;
-    var result = alpha;
-    while (i * 2 <= Math.floor(n)) {
-        result = result + result * (1.0 - result);
-        i *= 2;
-    }
-    while (i < Math.floor(n)) {
-        result = result + alpha * (1.0 - result);
-        ++i;
-    }
-    if (n > i) {
-        var remainder = n - i;
-        result = result + alpha * (1.0 - result) * remainder; // Rough linear approximation
-    }
-    return result;
-};
-
-/**
- * Calculate an alpha value so that blending a sample with that alpha n times
- * results approximately in the given flow value.
- * @param {number} flow The flow value, between 0 and 1.
- * @param {number} n The number of times to blend.
- * @return {number} Such alpha value that blending it with itself n times
- * results in the given flow value.
- */
-colorUtil.approximateAlphaForNBlends = function(flow, n) {
-    // Solved from alpha blending differential equation:
-    // flow'(n) = (1.0 - flow(n)) * singleBlendAlpha
-    //return Math.min(-Math.log(1.0 - flow) / n, 1.0);
-
-    // Above solution with an ad-hoc tweak:
-    return Math.min(-Math.log(1.0 - flow) / (n + Math.pow(flow, 2) * 1.5), 1.0);
-};
-
-/**
- * Calculate an alpha value so that blending a sample with that alpha n times
- * results in the given flow value.
- * @param {number} flow The flow value, between 0 and 1.
- * @param {number} n The number of times to blend.
- * @return {number} Such alpha value that blending it with itself n times
- * results in the given flow value.
- */
-colorUtil.alphaForNBlends = function(flow, n) {
-    if (n < 1.0) {
-        return Math.min(flow / n, 1.0);
-    }
-    if (flow < 1.0) {
-        var guess = colorUtil.approximateAlphaForNBlends(flow, n);
-        var low = 0;
-        var high = flow;
-        // Bisect until result is close enough
-        while (true) {
-            var blended = colorUtil.nBlends(guess, n);
-            if (Math.abs(blended - flow) < 0.0005) {
-                return guess;
-            }
-            if (blended < flow) {
-                low = guess;
-            } else {
-                high = guess;
-            }
-            guess = (low + high) * 0.5;
-        }
-    } else {
-        return 1.0;
-    }
+    return [RGB[0], RGB[1], RGB[2]];
 };
 
 /**
@@ -261,15 +175,17 @@ colorUtil.differentColor = function(color) {
  * @return {number} Blend result as an integer from 0 to 255.
  */
 colorUtil.blendWithFunction = function(blendFunction, target, source, targetAlpha, sourceAlpha) {
-    // First calculate the blending result without taking the transparency of the target into account.
-    var rawResult = blendFunction(target, source);
-    // Normal blending result should be mixed in relative to the transparency of the blend target.
-    var blendResult = mathUtil.mix(source, rawResult, targetAlpha);
-    // The final mix depends on the alpha of the blend source.
-    if (targetAlpha > 0) {
-        return Math.round(mathUtil.mix(target, blendResult, sourceAlpha));
+    var alpha = targetAlpha + sourceAlpha * (1.0 - targetAlpha);
+    if (alpha > 0.0) {
+        // First calculate the blending result without taking the transparency of the target into account.
+        var rawResult = blendFunction(target, source);
+        // Then mix according to weights.
+        // See KHR_blend_equation_advanced specification for reference.
+        return Math.round((rawResult * targetAlpha * sourceAlpha +
+                           source * sourceAlpha * (1.0 - targetAlpha) +
+                           target * targetAlpha * (1.0 - sourceAlpha)) / alpha);
     } else {
-        return Math.round(blendResult);
+        return 0.0;
     }
 };
 
@@ -956,11 +872,24 @@ Rect.prototype.area = function() {
 };
 
 /**
+ * @return {Object} This rectangle in a different representation. The return
+ * value includes numbers x (left edge), y (top edge), w (width) and h (height).
+ */
+Rect.prototype.getXYWH = function() {
+    return {
+        x: this.left,
+        y: this.top,
+        w: this.right - this.left,
+        h: this.bottom - this.top
+    };
+};
+
+/**
  * @return {Object} This rectangle rounded out to integer coordinates. The
  * return value includes numbers x (left edge), y (top edge), w (width) and h
  * (height).
  */
-Rect.prototype.getXYWH = function() {
+Rect.prototype.getXYWHRoundedOut = function() {
     return {
         x: Math.floor(this.left),
         y: Math.floor(this.top),
@@ -971,47 +900,32 @@ Rect.prototype.getXYWH = function() {
 
 /**
  * Set this rectangle to the bounding box of this rectangle and the given
- * circle.
- * @param {number} x The x coordinate of the center of the circle.
- * @param {number} y The y coordinate of the center of the circle.
- * @param {number} radius The radius of the circle.
- */
-Rect.prototype.unionCircle = function(x, y, radius) {
-    this.unionCoords(x - radius, x + radius, y - radius, y + radius);
-};
-
-/**
- * Set this rectangle to the bounding box of this rectangle and the given
- * rectangle.
- * @param {number} left Left edge of the rectangle.
- * @param {number} right Right edge of the rectangle.
- * @param {number} top Top edge of the rectangle.
- * @param {number} bottom Bottom edge of the rectangle.
- */
-Rect.prototype.unionCoords = function(left, right, top, bottom) {
-    if (left === right || top === bottom) {
-        return;
-    }
-    if (this.left === this.right || this.top === this.bottom) {
-        this.left = left;
-        this.right = right;
-        this.top = top;
-        this.bottom = bottom;
-    } else {
-        this.left = Math.min(this.left, left);
-        this.right = Math.max(this.right, right);
-        this.top = Math.min(this.top, top);
-        this.bottom = Math.max(this.bottom, bottom);
-    }
-};
-
-/**
- * Set this rectangle to the bounding box of this rectangle and the given
  * rectangle.
  * @param {Rect} rect Another rectangle.
  */
 Rect.prototype.unionRect = function(rect) {
-    this.unionCoords(rect.left, rect.right, rect.top, rect.bottom);
+    if (rect.isEmpty()) {
+        return;
+    }
+    if (this.isEmpty()) {
+        this.setRect(rect);
+    } else {
+        this.left = Math.min(this.left, rect.left);
+        this.right = Math.max(this.right, rect.right);
+        this.top = Math.min(this.top, rect.top);
+        this.bottom = Math.max(this.bottom, rect.bottom);
+    }
+};
+
+/**
+ * @param {Rect} rect Another rectangle.
+ * @return {Rect} A new rectangle containing the union of this rectangle and the
+ * given rectangle.
+ */
+Rect.prototype.getUnion = function(rect) {
+    var ret = new Rect(rect.left, rect.right, rect.top, rect.bottom);
+    ret.unionRect(this);
+    return ret;
 };
 
 /**
@@ -1020,7 +934,10 @@ Rect.prototype.unionRect = function(rect) {
  * @param {Rect} rect Another rectangle.
  */
 Rect.prototype.intersectRect = function(rect) {
-    if (rect.left === rect.right || rect.top === rect.bottom) {
+    if (this.isEmpty()) {
+        return;
+    }
+    if (rect.isEmpty()) {
         this.makeEmpty();
     } else {
         this.left = Math.max(this.left, rect.left);
@@ -1031,6 +948,17 @@ Rect.prototype.intersectRect = function(rect) {
             this.makeEmpty();
         }
     }
+};
+
+/**
+ * @param {Rect} rect Another rectangle.
+ * @return {Rect} A new rectangle containing the intersection of this rectangle
+ * and the given rectangle.
+ */
+Rect.prototype.getIntersection = function(rect) {
+    var ret = new Rect(rect.left, rect.right, rect.top, rect.bottom);
+    ret.intersectRect(this);
+    return ret;
 };
 
 /**
@@ -1066,71 +994,15 @@ Rect.prototype.limitRight = function(right) {
 };
 
 /**
- * Set this rectangle to the intersection of this this rectangle and the given
- * rectangle, first rounding out both rectangles to integer coordinates.
- * @param {Rect} rect Another rectangle.
- */
-Rect.prototype.intersectRectRoundedOut = function(rect) {
-    if (rect.left === rect.right || rect.top === rect.bottom ||
-        !this.intersectsRectRoundedOut(rect)) {
-        this.makeEmpty();
-    } else {
-        this.left = Math.max(Math.floor(this.left), Math.floor(rect.left));
-        this.right = Math.min(Math.ceil(this.right), Math.ceil(rect.right));
-        this.top = Math.max(Math.floor(this.top), Math.floor(rect.top));
-        this.bottom = Math.min(Math.ceil(this.bottom), Math.ceil(rect.bottom));
-    }
-};
-
-/**
- * Determine if this rectangle intersects with the bounding box of the given
- * circle, when they are both rounded out to integer coordinates.
- * @param {number} x The x coordinate of the center of the circle.
- * @param {number} y The y coordinate of the center of the circle.
- * @param {number} radius The radius of the circle.
- * @return {boolean} Does this rectangle intersect the bounding box of the
- * circle?
- */
-Rect.prototype.mightIntersectCircleRoundedOut = function(x, y, radius) {
-    return this.intersectsCoordsRoundedOut(x - radius, x + radius,
-                                           y - radius, y + radius);
-};
-
-/**
- * Determine if this rectangle intersects with another rectangle, when both
- * rectangles have first been rounded out to integer coordinates.
- * @param {Rect} rect Another rectangle.
- * @return {boolean} Does this rectangle intersect the other rectangle?
- */
-Rect.prototype.intersectsRectRoundedOut = function(rect) {
-    return this.intersectsCoordsRoundedOut(rect.left, rect.right,
-                                           rect.top, rect.bottom);
-};
-
-/**
- * Determine if this rectangle intersects with another rectangle defined by the
- * given coordinates, when both rectangles have first been rounded out to
- * integer coordinates.
- * @param {number} left Left edge of the rectangle.
- * @param {number} right Right edge of the rectangle.
- * @param {number} top Top edge of the rectangle.
- * @param {number} bottom Bottom edge of the rectangle.
- * @return {boolean} Does this rectangle intersect the other rectangle?
- */
-Rect.prototype.intersectsCoordsRoundedOut = function(left, right, top, bottom) {
-    return !(this.right <= Math.floor(left) || this.left >= Math.ceil(right) ||
-             this.bottom <= Math.floor(top) || this.top >= Math.ceil(bottom));
-};
-
-/**
  * @param {Vec2} coords Coordinates to check.
  * @return {boolean} Does this rectangle contain the given coordinates?
  */
-Rect.prototype.containsRoundedOut = function(coords) {
-    return Math.floor(this.left) <= coords.x &&
-           Math.ceil(this.right) >= coords.x &&
-           Math.floor(this.top) <= coords.y &&
-           Math.ceil(this.bottom) >= coords.y;
+Rect.prototype.containsVec2 = function(coords) {
+    return !this.isEmpty() &&
+           this.left <= coords.x &&
+           this.right >= coords.x &&
+           this.top <= coords.y &&
+           this.bottom >= coords.y;
 };
 
 /**
@@ -1141,17 +1013,6 @@ Rect.prototype.containsRoundedOut = function(coords) {
  Rect.prototype.containsRect = function(rect) {
     return this.left <= rect.left && this.right >= rect.right &&
            this.top <= rect.top && this.bottom >= rect.bottom;
-};
-
-/**
- * @param {Rect} rect Another rectangle.
- * @return {Rect} A new rectangle containing the intersection of this rectangle
- * and the given rectangle.
- */
-Rect.prototype.getIntersection = function(rect) {
-    var ret = new Rect(rect.left, rect.right, rect.top, rect.bottom);
-    ret.intersectRect(this);
-    return ret;
 };
 
 /**
@@ -1259,7 +1120,7 @@ canvasUtil.getCurrentTransform = function(ctx) {
  * @param {Rect} rect Rectangle to set as canvas clip rectangle.
  */
 canvasUtil.clipRect = function(ctx, rect) {
-    var xywh = rect.getXYWH();
+    var xywh = rect.getXYWHRoundedOut();
     ctx.beginPath();
     ctx.rect(xywh.x, xywh.y, xywh.w, xywh.h);
     ctx.clip();

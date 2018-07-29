@@ -13,10 +13,9 @@ describe('PictureEvent', function() {
 
         it('is the same after serialization and parsing', function() {
             var event = creator();
-            var serialization = event.serialize();
-            var splitSerialization = serialization.split(' ');
-            var parsedEvent = PictureEvent.parse(splitSerialization, 0,
-                                                 Picture.formatVersion);
+            var serialization = serializeToString(event);
+            console.log(serialization);
+            var parsedEvent = PictureEvent.fromJS(JSON.parse(serialization));
             tester(parsedEvent);
         });
 
@@ -154,8 +153,11 @@ describe('PictureEvent', function() {
      * @return {string} The serialization.
      */
     var serializeLegacyBrushEvent = function(scale, version) {
-        var eventMessage = this.serializePictureEvent();
-        eventMessage += ' ' + colorUtil.serializeRGB(this.color);
+        var eventMessage = '' + this.eventType;
+        eventMessage += ' ' + this.sid;
+        eventMessage += ' ' + this.sessionEventId;
+        eventMessage += ' ' + (this.undone ? '1' : '0');
+        eventMessage += ' ' + this.color[0] + ' ' + this.color[1] + ' ' + this.color[2];
         eventMessage += ' ' + this.flow + ' ' + this.opacity;
         eventMessage += ' ' + (this.radius * scale);
         if (version > 1) {
@@ -178,6 +180,7 @@ describe('PictureEvent', function() {
                     eventMessage += ' ' + this.coords[i++]; // rotation
                 } else {
                     eventMessage += ' ' + this.coords[i++] / this.radius; // pressure
+                    i += 2;
                 }
             } else {
                 eventMessage += ' ' + this.coords[i++]; // pressure
@@ -214,7 +217,9 @@ describe('PictureEvent', function() {
             testEvent.serializeLegacy = serializeLegacyBrushEvent;
             var serialization = testEvent.serializeLegacy(1.0, version);
             var splitSerialization = serialization.split(' ');
-            var parsedEvent = PictureEvent.parse(splitSerialization, 0, version);
+            var json = {};
+            PictureEvent.parseLegacy(json, splitSerialization, 0, version);
+            var parsedEvent = PictureEvent.fromJS(json);
             expectTestBrushEvent(parsedEvent);
         });
     });
@@ -268,7 +273,9 @@ describe('PictureEvent', function() {
                 testEvent.serializeLegacy = serializeLegacyBrushEvent;
                 var serialization = testEvent.serializeLegacy(1.0, version);
                 var splitSerialization = serialization.split(' ');
-                var parsedEvent = PictureEvent.parse(splitSerialization, 0, version);
+                var json = {};
+                PictureEvent.parseLegacy(json, splitSerialization, 0, version);
+                var parsedEvent = PictureEvent.fromJS(json);
                 expectTestScatterEvent(parsedEvent, 5);
                 expect(parsedEvent.coords[0]).toBeNear(0.5, 0.001);
                 expect(parsedEvent.coords[1]).toBeNear(1.6, 0.001);
@@ -304,7 +311,7 @@ describe('PictureEvent', function() {
             var tipMover = new BrushTipMover(false);
             tipMover.reset(testEvent, new AffineTransform(), 1, 2, 0.3, testEvent.radius, testEvent.flow, 0, 1, false,
                            BrushTipMover.Rotation.random);
-            tipMover.move(100, 2, 0.3);
+            tipMover.move(200, 2, 0.3);
             var count = 0;
             var sum = 0;
             var deviation = 0;

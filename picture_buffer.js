@@ -79,6 +79,7 @@ PictureBuffer.prototype.crop = function(width, height, rasterizer) {
     this.clipStack = [];
     this.currentClipRect = new Rect(0, width, 0, height);
     this.regenerate(true, rasterizer);
+    this.blameRasterizer = new Rasterizer(width, height, null);
 };
 
 /**
@@ -919,7 +920,7 @@ CanvasBuffer.prototype.applyStateObject = function(undoState) {
  * @protected
  */
 CanvasBuffer.prototype.clear = function(clearColor) {
-    var br = this.getCurrentClipRect().getXYWH();
+    var br = this.getCurrentClipRect().getXYWHRoundedOut();
     if (clearColor.length === 4 && clearColor[3] < 255) {
         this.ctx.clearRect(br.x, br.y, br.w, br.h);
     }
@@ -989,7 +990,7 @@ CanvasBuffer.prototype.drawRasterizerWithColor = function(raster, color,
  */
 CanvasBuffer.drawRasterizer = function(dataCtx, targetCtx, raster, clipRect,
                                        opaque, color, opacity, mode) {
-    var br = clipRect.getXYWH();
+    var br = clipRect.getXYWHRoundedOut();
     if (br.w === 0 || br.h === 0) {
         return;
     }
@@ -1074,7 +1075,7 @@ CanvasBuffer.drawRasterizer = function(dataCtx, targetCtx, raster, clipRect,
  * @param {Rect} rect The extents of the image in this buffer's coordinates.
  */
 CanvasBuffer.prototype.drawImage = function(img, rect) {
-    var br = this.getCurrentClipRect().getXYWH();
+    var br = this.getCurrentClipRect().getXYWHRoundedOut();
     if (br.w === 0 || br.h === 0) {
         return;
     }
@@ -1095,7 +1096,7 @@ CanvasBuffer.prototype.drawImage = function(img, rect) {
 CanvasBuffer.prototype.drawBuffer = function(buffer, opacity) {
     // TODO: Should rather use the compositor for this, but it needs some API
     // changes.
-    var br = this.getCurrentClipRect().getXYWH();
+    var br = this.getCurrentClipRect().getXYWHRoundedOut();
     if (br.w === 0 || br.h === 0) {
         return;
     }
@@ -1215,9 +1216,10 @@ GLBuffer.prototype.clear = function(unPremulClearColor) {
                            unPremulClearColor[2] / 255.0,
                            1.0);
     } else {
-        var clearColor = colorUtil.premultiply(unPremulClearColor);
-        this.gl.clearColor(clearColor[0] / 255.0, clearColor[1] / 255.0,
-                           clearColor[2] / 255.0, clearColor[3] / 255.0);
+        this.gl.clearColor(unPremulClearColor[0] / 255.0,
+                           unPremulClearColor[1] / 255.0,
+                           unPremulClearColor[2] / 255.0,
+                           unPremulClearColor[3] / 255.0);
     }
     this.gl.clear(this.gl.COLOR_BUFFER_BIT);
 };
@@ -1246,28 +1248,23 @@ GLBuffer.prototype.updateClip = function() {
 GLBuffer.prototype.drawRasterizerWithColor = function(raster, color, opacity,
                                                       mode) {
     this.updateClip();
-    if (mode === PictureEvent.Mode.normal || mode === PictureEvent.Mode.erase) {
-        this.glManager.useFboTex(this.tex);
-        if (!this.hasAlpha && mode === PictureEvent.Mode.erase) {
-            mode = PictureEvent.Mode.normal;
-            color = this.events[0].clearColor;
-        }
-        raster.drawWithColor(color, opacity, mode);
-    } else {
-        // Copy into helper texture from this.tex, then use compositor to render
-        // that blended with the contents of the rasterizer back to this.tex.
-        var helper = glUtils.createTexture(this.gl, this.width(),
-                                           this.height());
-        this.glManager.useFboTex(helper);
-        this.texBlitUniforms['uSrcTex'] = this.tex;
-        this.glManager.drawFullscreenQuad(this.texBlitProgram, this.texBlitUniforms);
-
-        this.glManager.useFboTex(this.tex);
-        this.compositor.pushBufferTex(helper, 1.0, false);
-        this.compositor.pushRasterizer(raster, color, opacity, mode, null);
-        this.compositor.flush();
-        this.gl.deleteTexture(helper);
+    if (!this.hasAlpha && mode === PictureEvent.Mode.erase) {
+        mode = PictureEvent.Mode.normal;
+        color = this.events[0].clearColor;
     }
+    // Copy into helper texture from this.tex, then use compositor to render
+    // that blended with the contents of the rasterizer back to this.tex.
+    var helper = glUtils.createTexture(this.gl, this.width(),
+                                       this.height());
+    this.glManager.useFboTex(helper);
+    this.texBlitUniforms['uSrcTex'] = this.tex;
+    this.glManager.drawFullscreenQuad(this.texBlitProgram, this.texBlitUniforms);
+
+    this.glManager.useFboTex(this.tex);
+    this.compositor.pushBufferTex(helper, 1.0, false);
+    this.compositor.pushRasterizer(raster, color, opacity, mode, null);
+    this.compositor.flush();
+    this.gl.deleteTexture(helper);
 };
 
 /**
@@ -1355,8 +1352,6 @@ GLBuffer.prototype.getPixelRGBA = function(coords) {
     var pixelData = new Uint8Array(buffer);
     var glX = Math.min(Math.floor(coords.x), this.width() - 1);
     var glY = Math.max(0, this.height() - 1 - Math.floor(coords.y));
-    this.gl.readPixels(glX, glY, 1, 1, this.gl.RGBA, this.gl.UNSIGNED_BYTE,
-                       pixelData);
-    pixelData = colorUtil.unpremultiply(pixelData);
+    this.gl.readPixels(glX, glY, 1, 1, this.gl.RGBA, this.gl.UNSIGNED_BYTE, pixelData);
     return pixelData;
 };

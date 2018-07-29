@@ -13,7 +13,7 @@ var testBufferParams = {
     hasAlpha: true
 };
 
-var testBuffer = function(initTestCanvas, resizeTestCanvas, createBuffer, createRasterizer, params) {
+var testBuffer = function(initTestCanvas, resizeTestCanvas, createBuffer, createRasterizer, params, premultiplied) {
     it('initializes', function() {
         // This is a hacky way of doing global setup for this group of tests.
         // But just running global setup before any tests are run doesn't work
@@ -112,9 +112,6 @@ var testBuffer = function(initTestCanvas, resizeTestCanvas, createBuffer, create
                                            PictureEvent.Mode.erase);
         buffer.pushEvent(brushEvent, rasterizer);
         var samplePixel = buffer.getPixelRGBA(new Vec2(0, 0));
-        expect(samplePixel[0]).toBe(0);
-        expect(samplePixel[1]).toBe(0);
-        expect(samplePixel[2]).toBe(0);
         expect(samplePixel[3]).toBe(0);
 
         rasterizer.free();
@@ -187,7 +184,30 @@ var testBuffer = function(initTestCanvas, resizeTestCanvas, createBuffer, create
             var samplePixel = buffer.getPixelRGBA(new Vec2(0, 0));
             var targetAlpha = params.clearColor[3] / 255;
             for (var chan = 0; chan < 3; chan++) {
-                expect(samplePixel[chan]).toBeNear(brushColor[chan], 3.0);
+                expect(samplePixel[chan]).toBeNear(brushColor[chan], 2.0);
+            }
+            var alpha = (targetAlpha + opacity - targetAlpha * opacity) * 255;
+            expect(samplePixel[3]).toBeNear(alpha, 10);
+            rasterizer.free();
+            buffer.free();
+            params.clearColor = oldClearColor;
+        });
+
+        it('blends an event to a nearly transparent bitmap with the ' + testName + ' blend mode', function() {
+            initTestCanvas();
+
+            var oldClearColor = params.clearColor;
+            params.clearColor = [0, 0, 0, 1];
+            var buffer = createBuffer(params);
+            var rasterizer = createRasterizer(params);
+            var opacity = 0.6;
+            var brushColor = [0.2 * 255, 0.4 * 255, 0.8 * 255];
+            var brushEvent = fillingBrushEvent(params.width, params.height, brushColor, opacity, blendMode);
+            buffer.pushEvent(brushEvent, rasterizer);
+            var samplePixel = buffer.getPixelRGBA(new Vec2(0, 0));
+            var targetAlpha = params.clearColor[3] / 255;
+            for (var chan = 0; chan < 3; chan++) {
+                expect(samplePixel[chan]).toBeNear(brushColor[chan], 4.0);
             }
             var alpha = (targetAlpha + opacity - targetAlpha * opacity) * 255;
             expect(samplePixel[3]).toBeNear(alpha, 10);
@@ -255,9 +275,10 @@ var testBuffer = function(initTestCanvas, resizeTestCanvas, createBuffer, create
         var scatterEvent = testScatterEvent();
         // Assumptions this test makes:
         expect(scatterEvent.radius).toBeLessThan(params.width / 2);
+        expect(scatterEvent.mode).toBe(PictureEvent.Mode.normal);
 
-        scatterEvent.fillCircle(0, 0, 25, scatterEvent.flow, 0);
-        scatterEvent.fillCircle(params.width, params.height, 25, scatterEvent.flow, 0);
+        scatterEvent.fillCircle(0, 0, scatterEvent.radius, scatterEvent.flow, 0);
+        scatterEvent.fillCircle(params.width, params.height, scatterEvent.radius, scatterEvent.flow, 0);
         buffer.pushEvent(scatterEvent, rasterizer);
         var scatterEventColor = [scatterEvent.color[0], scatterEvent.color[1],
                                  scatterEvent.color[2], scatterEvent.flow *
@@ -896,14 +917,37 @@ var testBuffer = function(initTestCanvas, resizeTestCanvas, createBuffer, create
         buffer.free();
     });
 
+    it('blames an event after being cropped to a larger size', function() {
+        initTestCanvas();
+        var buffer = createBuffer(params);
+        var rasterizer = createRasterizer(params);
+        var brushEvent = fillingBrushEvent(params.width, params.height,
+                                       [90, 30, 60], 1.0,
+                                       PictureEvent.Mode.normal);
+        brushEvent.translate(new Vec2(params.width, params.height));
+        buffer.pushEvent(brushEvent, rasterizer);
+
+        var newWidth = Math.ceil(params.width + 1);
+        var newHeight = Math.ceil(params.height + 1);
+        resizeTestCanvas(newWidth, newHeight);
+        rasterizer = createRasterizer({width: newWidth, height: newHeight});
+        buffer.crop(newWidth, newHeight, rasterizer);
+
+        var blame = buffer.blamePixel(new Vec2(params.width, params.height));
+        expect(blame.length).toBe(1);
+        expect(blame[0].event).toBe(brushEvent);
+        expect(blame[0].alpha).toBe(1.0);
+
+        rasterizer.free();
+        buffer.free();
+    });
+
     it('undoes an event after being cropped', function() {
         initTestCanvas();
         var buffer = createBuffer(params);
         var rasterizer = createRasterizer(params);
         fillBuffer(buffer, rasterizer, buffer.undoStateInterval + 1); // We want to hit an undo state in this test.
-        var brushEvent = fillingBrushEvent(params.width, params.height,
-                                       [90, 30, 60], 1.0,
-                                       PictureEvent.Mode.normal);
+        var brushEvent = fillingBrushEvent(params.width, params.height, [90, 30, 60], 1.0, PictureEvent.Mode.normal);
         brushEvent.translate(new Vec2(-params.width * 3, -params.height * 3));
         buffer.pushEvent(brushEvent, rasterizer);
 
@@ -930,6 +974,49 @@ var testBuffer = function(initTestCanvas, resizeTestCanvas, createBuffer, create
         rasterizer.free();
         buffer.free();
     });
+
+    if (!premultiplied) {
+        it('blends an event with very low alpha accurately', function() {
+            initTestCanvas();
+            var oldClearColor = params.clearColor;
+            params.clearColor = [0, 0, 0, 0];
+            var buffer = createBuffer(params);
+            var rasterizer = createRasterizer(params);
+            var brushEvent = fillingBrushEvent(params.width, params.height, [90, 30, 60], 0.02,
+                                               PictureEvent.Mode.normal);
+            buffer.pushEvent(brushEvent, rasterizer);
+            var samplePixel = buffer.getPixelRGBA(new Vec2(0, 0));
+            expect(samplePixel[0]).toBeNear(90, 4);
+            expect(samplePixel[1]).toBeNear(30, 4);
+            expect(samplePixel[2]).toBeNear(60, 4);
+            params.clearColor = oldClearColor;
+
+            rasterizer.free();
+            buffer.free();
+        });
+
+        it('blends several events with very low alpha accurately', function() {
+            initTestCanvas();
+            var oldClearColor = params.clearColor;
+            params.clearColor = [0, 0, 0, 0];
+            var buffer = createBuffer(params);
+            var rasterizer = createRasterizer(params);
+            for (var i = 0; i < 50; ++i) {
+                var brushEvent = fillingBrushEvent(params.width, params.height, [90, 30, 60], 0.02,
+                                                   PictureEvent.Mode.normal);
+                brushEvent.sessionEventId = i + 1;
+                buffer.pushEvent(brushEvent, rasterizer);
+            }
+            var samplePixel = buffer.getPixelRGBA(new Vec2(0, 0));
+            expect(samplePixel[0]).toBeNear(90, 4);
+            expect(samplePixel[1]).toBeNear(30, 4);
+            expect(samplePixel[2]).toBeNear(60, 4);
+            params.clearColor = oldClearColor;
+
+            rasterizer.free();
+            buffer.free();
+        });
+    }
 };
 
 describe('CanvasBuffer', function() {
@@ -943,7 +1030,7 @@ describe('CanvasBuffer', function() {
     var createRasterizer = function(params) {
         return new Rasterizer(params.width, params.height, null);
     };
-    testBuffer(function() {}, function() {}, createBuffer, createRasterizer, testBufferParams);
+    testBuffer(function() {}, function() {}, createBuffer, createRasterizer, testBufferParams, true);
 });
 
 describe('GLBuffer', function() {
@@ -958,6 +1045,7 @@ describe('GLBuffer', function() {
     var rectBlitProgram;
     var initTestCanvas = function() {
         if (testsInitialized) {
+            resizeTestCanvas(params.width, params.height);
             return;
         }
         testsInitialized = true;
@@ -990,5 +1078,5 @@ describe('GLBuffer', function() {
         return new GLDoubleBufferedRasterizer(gl, glManager, params.width, params.height, null);
     };
 
-    testBuffer(initTestCanvas, resizeTestCanvas, createBuffer, createRasterizer, params);
+    testBuffer(initTestCanvas, resizeTestCanvas, createBuffer, createRasterizer, params, false);
 });

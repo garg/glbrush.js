@@ -381,7 +381,7 @@ Rasterizer.prototype.drawWithColorToOpaque = function(targetData, color,
  * Clear the rasterizer's bitmap to all 0's.
  */
 Rasterizer.prototype.clear = function() {
-    var br = this.clipRect.getXYWH();
+    var br = this.clipRect.getXYWHRoundedOut();
     for (var y = 0; y < br.h; ++y) {
         for (var x = 0; x < br.w; ++x) {
             this.data[br.x + x + (br.y + y) * this.width] = 0;
@@ -608,7 +608,7 @@ Rasterizer.prototype.fillSoftCircleBlending = function(boundsRect, centerX, cent
  * @param {Vec2} coords0 Coordinates for the 0.0 end of the gradient.
  */
 Rasterizer.prototype.linearGradient = function(coords1, coords0) {
-    var br = this.clipRect.getXYWH();
+    var br = this.clipRect.getXYWHRoundedOut();
     if (coords1.x === coords0.x) {
         if (coords1.y === coords0.y) {
             return;
@@ -888,18 +888,14 @@ GLDoubleBufferedRasterizer.prototype.getTex = function() {
 };
 
 /**
- * Draw the rasterizer's contents to the current framebuffer.
+ * Draw the rasterizer's contents to the current framebuffer. To be used for testing only.
  * @param {Uint8Array|Array.<number>} color Color to use for drawing. Channel
  * values should be 0-255.
  * @param {number} opacity Opacity to use when drawing the rasterization result.
  * Opacity for each individual pixel is its rasterized opacity times this
  * opacity value.
- * @param {PictureEvent.Mode} mode Blending mode to use for drawing.
  */
-GLDoubleBufferedRasterizer.prototype.drawWithColor = function(color, opacity, mode) {
-    if (mode === PictureEvent.Mode.erase) {
-        this.gl.blendFunc(this.gl.ZERO, this.gl.ONE_MINUS_SRC_ALPHA);
-    }
+GLDoubleBufferedRasterizer.prototype.drawWithColor = function(color, opacity) {
     this.convUniformParameters['uSrcTex'] = this.getTex();
     for (var i = 0; i < 3; ++i) {
         this.convUniformParameters['uColor'][i] = color[i] / 255.0;
@@ -907,9 +903,6 @@ GLDoubleBufferedRasterizer.prototype.drawWithColor = function(color, opacity, mo
     this.convUniformParameters['uColor'][3] = opacity;
     this.glManager.drawFullscreenQuad(this.conversionProgram,
                                       this.convUniformParameters);
-    if (mode === PictureEvent.Mode.erase) {
-        this.gl.blendFunc(this.gl.ONE, this.gl.ONE_MINUS_SRC_ALPHA);
-    }
 };
 
 /**
@@ -1105,7 +1098,7 @@ GLDoubleBufferedRasterizer.prototype.getPixel = function(coords) {
     glUtils.updateClip(this.gl, new Rect(left, left + 1, top, top + 1),
                        this.height);
     this.gl.clear(this.gl.COLOR_BUFFER_BIT);
-    this.drawWithColor([255, 255, 255], 1.0, PictureEvent.Mode.normal);
+    this.drawWithColor([255, 255, 255], 1.0);
     var pixel = new Uint8Array([0, 0, 0, 0]);
     this.gl.readPixels(left, this.height - 1 - top, 1, 1, this.gl.RGBA,
                        this.gl.UNSIGNED_BYTE, pixel);

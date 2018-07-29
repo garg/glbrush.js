@@ -1,3 +1,5 @@
+from __future__ import print_function
+
 import subprocess
 import os
 
@@ -24,7 +26,7 @@ def lib_js():
         return 'C' + path
     js_files = sorted(js_files, key=client_js_key)
     return js_files_in(os.path.join(glbrush, 'lib')) + js_files
-    
+
 def compile_glbrush(output_path):
     '''Compile glbrush.js with Closure compiler.
     output_path should include the name of the file.'''
@@ -37,15 +39,18 @@ def compile_glbrush(output_path):
     os.chdir(compiler_path)
 
     if not os.path.exists('compiler.jar'):
-        print 'compiler.jar missing - download Closure compiler and place it to directory "compile"'
-        os.chdir(restore_dir)
-        return False
+        print('Automatically downloading Closure compiler toolchain')
+        from fetch_compiler import fetch_compiler
+        if not fetch_compiler('compiler.jar'):
+            print('Place compiler.jar to directory "compile"')
+            os.chdir(restore_dir)
+            return False
 
     # Compile a package that's usable within another app, so WHITESPACE_ONLY
     command = ['java', '-jar', 'compiler.jar', '--compilation_level', 'WHITESPACE_ONLY', '--js']
     command += lib_js_list
     command += ['--js_output_file', output_path]
-    print ' '.join(command)
+    print(' '.join(command))
     subprocess.call(command)
 
     os.chdir(restore_dir)

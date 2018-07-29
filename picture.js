@@ -476,16 +476,20 @@ Picture.parse = function(id, serialization, bitmapScale, modesToTry, brushTextur
             width = parseInt(pictureParams[3]);
             height = parseInt(pictureParams[4]);
         } else {
-            left = parseInt(pictureParams[3]);
-            top = parseInt(pictureParams[4]);
-            width = parseInt(pictureParams[5]);
-            height = parseInt(pictureParams[6]);
+            left = parseFloat(pictureParams[3]);
+            top = parseFloat(pictureParams[4]);
+            width = parseFloat(pictureParams[5]);
+            height = parseFloat(pictureParams[6]);
         }
     }
     if (version > 2) {
-        var hasName = pictureParams[5];
+        var nameIndex = 5;
+        if (version > 5) {
+            nameIndex = 7;
+        }
+        var hasName = pictureParams[nameIndex];
         if (hasName === 'named') {
-            name = window.atob(pictureParams[6]);
+            name = window.atob(pictureParams[nameIndex + 1]);
         }
     }
     var pic = Picture.create(id, name, new Rect(left, left + width, top, top + height),
@@ -567,7 +571,9 @@ Picture.parse = function(id, serialization, bitmapScale, modesToTry, brushTextur
                 break;
             } else {
                 var arr = eventStrings[i].split(' ');
-                var pictureEvent = PictureEvent.parse(arr, 0, version);
+                var json = {};
+                PictureEvent.parseLegacy(json, arr, 0, version);
+                var pictureEvent = PictureEvent.fromJS(json);
                 if (pictureEvent.eventType === 'bufferMerge') {
                     mergeEvents.push(pictureEvent);
                 }
@@ -590,11 +596,17 @@ Picture.parse = function(id, serialization, bitmapScale, modesToTry, brushTextur
         delete pic.moveBufferInternal; // switch back to prototype's move function
     } else {
         // Parse PictureUpdates and process them in the original order.
+        var json;
         while (i < eventStrings.length) {
             if (eventStrings[i] === 'metadata') {
                 break;
             } else {
-                var update = PictureUpdate.parse(eventStrings[i]);
+                if (version < 7) {
+                    json = PictureUpdate.parseLegacy(eventStrings[i], version);
+                } else {
+                    json = JSON.parse(eventStrings[i]);
+                }
+                var update = PictureUpdate.fromJS(json);
                 if (update.updateType === 'add_picture_event' &&
                     update.pictureEvent.eventType === 'rasterImport') {
                     rasterImportEvents.push(update.pictureEvent);
@@ -658,7 +670,7 @@ Picture.prototype.minBitmapScale = function() {
 };
 
 /** @const */
-Picture.formatVersion = 6;
+Picture.formatVersion = 7;
 
 /**
  * @return {string} A serialization of this Picture. Can be parsed into a new
@@ -677,7 +689,7 @@ Picture.prototype.serialize = function() {
         buffer.events[0].insertionPoint = buffer.insertionPoint;
     }
     for (var i = 0; i < this.updates.length; ++i) {
-        serialization.push(this.updates[i].serialize());
+        serialization.push(serializeToString(this.updates[i]));
     }
     return serialization.join('\n');
 };
@@ -882,7 +894,7 @@ Picture.initWebGL = function(canvas, debugGL) {
         antialias: false,
         stencil: false,
         depth: false,
-        premultipliedAlpha: true
+        premultipliedAlpha: false
     };
     var gl = glUtils.initGl(canvas, contextAttribs, 4);
     if (!gl) {
@@ -1562,6 +1574,22 @@ Picture.prototype.regenerate = function() {
 };
 
 /**
+ * @constructor
+ * Container for animation related data.
+ * @param {Picture} picture The picture that is used for replaying the animation.
+ * @param {number} speed The animation playback speed.
+ * @param {number} updateCount The number of updates that are shown in the animation.
+ * @param {function()} pushUpdate Push a single update to the picture used for the animation.
+ */
+Picture.AnimationData = function(picture, speed, updateCount, pushUpdate) {
+    this.picture = picture;
+    this.speed = speed;
+    this.updateCount = updateCount;
+    this.updateIndex = 0;
+    this.pushUpdate = pushUpdate;
+};
+
+/**
  * Play back an animation displaying the progress of this picture from start to
  * finish.
  * @param {number} speed Speed at which to animate the individual events. Must
@@ -1592,27 +1620,45 @@ Picture.prototype.animate = function(speed, animationFinishedCallBack) {
     if (speed === undefined) {
         speed = 0.05;
     }
-    this.animationSpeed = speed;
+    var animationSpeed = speed;
 
-    var totalUpdates = this.updates.length;
-    this.animationPicture = new Picture(-1, 'animationPic', this.boundsRect, this.pictureTransform.scale, this.mode,
-                                        this.brushTextureData, this.canvas);
-    var updateIndex = 0;
+    var animationPicture = new Picture(-1, 'animationPic', this.boundsRect, this.pictureTransform.scale, this.mode,
+                                       this.brushTextureData, this.canvas);
+
     var updateT = 0;
     var update = null;
     var picEvent = null;
 
-    var animationFrame = function() {
-        if (updateIndex < totalUpdates) {
+    var pushAnimationUpdate = function() {
+        if (that.animationData.updateIndex < that.animationData.updateCount) {
             if (updateT === 0) {
-                var updateStr = that.updates[updateIndex].serialize();
-                update = PictureUpdate.parse(updateStr);
+                var updateStr = serializeToString(that.updates[that.animationData.updateIndex]);
+                update = PictureUpdate.fromJS(JSON.parse(updateStr));
+            }
+            // TODO: assert(update !== null)
+            that.animationData.picture.pushUpdate(update);
+            that.animationData.picture.setCurrentAnimationEvent(null);
+            ++that.animationData.updateIndex;
+            updateT = 0;
+        } else {
+            finishAnimating();
+        }
+    };
+
+    this.animationData = new Picture.AnimationData(
+        animationPicture, animationSpeed, this.updates.length, pushAnimationUpdate);
+
+    var animationFrame = function() {
+        if (that.animationData.updateIndex < that.animationData.updateCount) {
+            if (updateT === 0) {
+                var updateStr = serializeToString(that.updates[that.animationData.updateIndex]);
+                update = PictureUpdate.fromJS(JSON.parse(updateStr));
                 if (update.updateType === 'add_picture_event') {
                     picEvent = update.pictureEvent;
                     picEvent.undone = false;
                     if (picEvent.eventType === 'brush') {
-                        that.animationPicture.setCurrentEventAttachment(update.targetLayerId);
-                        that.animationPicture.setCurrentAnimationEvent(picEvent, 0);
+                        that.animationData.picture.setCurrentEventAttachment(update.targetLayerId);
+                        that.animationData.picture.setCurrentAnimationEvent(picEvent, 0);
                     } else {
                         updateT = 1;
                     }
@@ -1621,23 +1667,20 @@ Picture.prototype.animate = function(speed, animationFinishedCallBack) {
                 }
             }
             if (updateT < 1) {
-                updateT += that.animationSpeed;
+                updateT += that.animationData.speed;
                 if (updateT > 1) {
                     updateT = 1;
                 }
                 var untilCoord = picEvent.coords.length * updateT;
                 untilCoord = Math.ceil(untilCoord / 3) * 3;
-                picEvent.drawTo(that.animationPicture.currentEventRasterizer, that.pictureTransform, untilCoord);
+                picEvent.drawTo(that.animationData.picture.currentEventRasterizer, that.pictureTransform, untilCoord);
 
-                that.animationPicture.display();
+                that.animationData.picture.display();
                 window.requestAnimationFrame(animationFrame);
             } else {
-                that.animationPicture.pushUpdate(update);
-                that.animationPicture.setCurrentAnimationEvent(null);
-                ++updateIndex;
-                updateT = 0;
+                pushAnimationUpdate();
 
-                that.animationPicture.display();
+                that.animationData.picture.display();
                 window.setTimeout(animationFrame, 50);
             }
         } else {
@@ -1650,14 +1693,51 @@ Picture.prototype.animate = function(speed, animationFinishedCallBack) {
 };
 
 /**
+ * Scrub the animation to the given time if animation is in progress.
+ * Can currently be used only to scrub forward.
+ * @param {number} t Animation time from 0.0 to 1.0, inclusive.
+ */
+Picture.prototype.scrubAnimation = function(t) {
+    while (this.animating && this.animationData.updateIndex < t * this.animationData.updateCount) {
+        this.animationData.pushUpdate();
+    }
+    if (this.animating) {
+        this.animationData.picture.display();
+    }
+};
+
+/**
  * Stop animating if animation is in progress.
  */
 Picture.prototype.stopAnimating = function() {
     if (this.animating) {
         this.animating = false;
-        // TODO: this.animationPicture.free();
-        this.animationPicture = null;
+        // TODO: this.animationData.picture.free();
+        this.animationData.picture = null;
+        this.animationData.pushUpdate = null;
         this.display();
+    }
+};
+
+/**
+ * @return {number} The current animation position from 0 to 1.
+ */
+Picture.prototype.getAnimationT = function() {
+    if (this.animating && this.animationData.updateCount > 0) {
+        return this.animationData.updateIndex / this.animationData.updateCount;
+    } else {
+        return 0;
+    }
+};
+
+/**
+ * @return {number} The current animation speed.
+ */
+Picture.prototype.getAnimationSpeed = function() {
+    if (this.animating) {
+        return this.animationData.speed;
+    } else {
+        return 0;
     }
 };
 
@@ -1665,6 +1745,7 @@ Picture.prototype.stopAnimating = function() {
  * Return objects that contain events touching the given pixel. The objects
  * have two keys: event, and alpha which determines that event's alpha value
  * affecting this pixel. The objects are sorted from newest to oldest.
+ * The results are according to which buffers are currently being composited.
  * @param {Vec2} coords Position of the pixel in bitmap coordinates.
  * @return {Array.<Object>} Objects that contain events touching this pixel.
  */
@@ -1673,7 +1754,7 @@ Picture.prototype.blamePixel = function(coords) {
     var j = this.buffers.length;
     while (j >= 1) {
         --j;
-        if (this.buffers[j].events.length > 1 && !this.buffers[j].isRemoved()) {
+        if (this.buffers[j].events.length > 1 && this.buffers[j].isComposited()) {
             var bufferBlame = this.buffers[j].blamePixel(coords);
             if (bufferBlame.length > 0) {
                 blame = blame.concat(bufferBlame);
@@ -1698,7 +1779,6 @@ Picture.prototype.getPixelRGBA = function(coords) {
         var glY = Math.max(0, this.bitmapHeight() - 1 - Math.floor(coords.y));
         this.gl.readPixels(glX, glY, 1, 1, this.gl.RGBA, this.gl.UNSIGNED_BYTE,
                            pixelData);
-        pixelData = colorUtil.unpremultiply(pixelData);
         return pixelData;
     } else {
         return this.ctx.getImageData(Math.floor(coords.x),
