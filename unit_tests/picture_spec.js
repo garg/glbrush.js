@@ -10,6 +10,7 @@ var doPictureTestWithCleanup = function(mode, width, height, testPicture) {
         pic = testPicture();
     });
     afterEach(function() {
+        pic.renderer.free();
         pic.destroy();
         pic = null;
     });
@@ -18,7 +19,7 @@ var doPictureTestWithCleanup = function(mode, width, height, testPicture) {
         expect(pic.id).toBe(-1);
         expect(pic.name).toBe('testpicturename');
         expect(pic.pictureTransform.scale).toBe(2.0);
-        expect(pic.mode).toEqual(mode);
+        expect(pic.renderer.mode).toEqual(mode);
         expect(pic.width()).toBe(width);
         expect(pic.height()).toBe(height);
         expect(pic.bitmapWidth()).toBe(width * 2.0);
@@ -732,7 +733,7 @@ var doPictureTestWithCleanup = function(mode, width, height, testPicture) {
         var parsed;
         var serialization = pic.serialize();
         serialization += '\nmetadata\nappdata';
-        Picture.parse(0, serialization, 1.0, [pic.mode], undefined, function(p) {
+        Picture.parse(0, serialization, 1.0, PictureRenderer.create([pic.mode]), function(p) {
             parsed = p;
         });
         waitsFor(function() {
@@ -745,15 +746,13 @@ var doPictureTestWithCleanup = function(mode, width, height, testPicture) {
     });
 
     it('calculates its memory usage', function() {
-        var rasterizerUse = pic.currentEventRasterizer.getMemoryBytes() +
-                            pic.genericRasterizer.getMemoryBytes();
         var compositorUse = pic.bitmapWidth() * pic.bitmapHeight() * 4;
-        expect(pic.memoryUse).toBe(rasterizerUse + compositorUse);
+        expect(pic.memoryUse).toBe(compositorUse);
         var clearColor = [12, 23, 34, 0];
         pic.addBuffer(1337, clearColor, true);
         var states = pic.buffers[0].undoStateBudget + 1;
         var bufferUse = pic.bitmapWidth() * pic.bitmapHeight() * 4 * states;
-        expect(pic.memoryUse).toBe(rasterizerUse + compositorUse + bufferUse);
+        expect(pic.memoryUse).toBe(compositorUse + bufferUse);
     });
 
     it('limits its memory usage to meet the given budget', function() {
@@ -770,7 +769,8 @@ var doPictureTest = function(mode) {
     var width = 122;
     var height = 234;
     var testPicture = function() {
-        return new Picture(-1, 'testpicturename', new Rect(0, width, 0, height), 2.0, mode, 0);
+        var renderer = new PictureRenderer(mode, null);
+        return new Picture(-1, 'testpicturename', new Rect(0, width, 0, height), 2.0, renderer);
     };
 
     describe('tests with cleanup', function() {
@@ -779,25 +779,21 @@ var doPictureTest = function(mode) {
 
     if (mode.indexOf('webgl') !== -1) {
         it('has a global flag for failing webgl initialization', function() {
-            expect(Picture.hasFailedWebGLSanity).toBe(false);
+            expect(PictureRenderer.hasFailedWebGLSanity).toBe(false);
 
             // Break the rasterizers
             var oldDoubleBufferedFillCircle = GLDoubleBufferedRasterizer.prototype.fillCircle;
             var oldFloatFillCircle = GLFloatRasterizer.prototype.fillCircle;
-            var oldFloatTexDataFillCircle = GLFloatTexDataRasterizer.prototype.fillCircle;
             GLDoubleBufferedRasterizer.prototype.fillCircle = function() {};
             GLFloatRasterizer.prototype.fillCircle = function() {};
-            GLFloatTexDataRasterizer.prototype.fillCircle = function() {};
 
-            var pic = testPicture();
-            expect(Picture.hasFailedWebGLSanity).toBe(true);
-            pic.destroy();
+            var picRenderer = new PictureRenderer('webgl');
+            expect(PictureRenderer.hasFailedWebGLSanity).toBe(true);
 
             // Restore the rasterizers
             GLDoubleBufferedRasterizer.prototype.fillCircle = oldDoubleBufferedFillCircle;
             GLFloatRasterizer.prototype.fillCircle = oldFloatFillCircle;
-            GLFloatTexDataRasterizer.prototype.fillCircle = oldFloatTexDataFillCircle;
-            Picture.hasFailedWebGLSanity = false;
+            PictureRenderer.hasFailedWebGLSanity = false;
         });
     }
 
@@ -887,7 +883,7 @@ var doPictureTest = function(mode) {
 };
 
 describe('Picture', function() {
-    var modes = ['webgl', 'canvas', 'no-texdata-webgl', 'no-float-webgl'];
+    var modes = ['webgl', 'canvas', 'no-dynamic-webgl', 'no-float-webgl'];
     for (var i = 0; i < modes.length; ++i) {
         describe('in mode ' + modes[i], function() {
             doPictureTest(modes[i]);
@@ -898,7 +894,7 @@ describe('Picture', function() {
 
     it('parses a serialization without a version number', function() {
         var parsed;
-        Picture.parse(-1, 'picture 122 234', 2.0, [mode], undefined, function(p) {
+        Picture.parse(-1, 'picture 122 234', 2.0, PictureRenderer.create([mode]), function(p) {
             parsed = p;
         });
         waitsFor(function() {
@@ -910,7 +906,7 @@ describe('Picture', function() {
             expect(pic.id).toBe(-1);
             expect(pic.name).toBe(null);
             expect(pic.pictureTransform.scale).toBe(2.0);
-            expect(pic.mode).toEqual(mode);
+            expect(pic.renderer.mode).toEqual(mode);
             expect(pic.width()).toBe(122);
             expect(pic.height()).toBe(234);
             expect(pic.bitmapWidth()).toBe(pic.width() * 2.0);
@@ -930,7 +926,7 @@ describe('Picture', function() {
         'gradient 1 2 0 101 198 255 0.875 1 523 986 575 34'
         ].join('\n');
         var parsed;
-        Picture.parse(-1, picSerialization, 1.0, [mode], undefined, function(p) {
+        Picture.parse(-1, picSerialization, 1.0, PictureRenderer.create([mode]), function(p) {
             parsed = p;
         });
         waitsFor(function() {
@@ -996,7 +992,7 @@ describe('Picture', function() {
         'add_picture_event 0 eventHide 1 4 0 1 3'
         ].join('\n');
         var parsed;
-        Picture.parse(-1, picSerialization, 1.0, [mode], undefined, function(p) {
+        Picture.parse(-1, picSerialization, 1.0, PictureRenderer.create([mode]), function(p) {
             parsed = p;
         });
         waitsFor(function() {

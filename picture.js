@@ -11,21 +11,13 @@
  * @param {Rect} boundsRect Picture bounds in picture coordinates. Left and top bounds may be negative.
  * @param {number} bitmapScale Scale for rasterizing the picture. Events that
  * are pushed to this picture get this scale applied to them.
- * @param {string=} mode Either 'webgl', 'no-texdata-webgl' or 'canvas'. Defaults to 'webgl'.
- * @param {Array.<HTMLImageElement|HTMLCanvasElement>=} brushTextureData Set of brush textures to use. Can be undefined
- * if no textures are needed.
- * @param {HTMLCanvasElement=} externalCanvas Canvas element to use to composit this picture to. Must be of the correct
- * width and height. If not supplied one will be created.
+ * @param {PictureRenderer} renderer Renderer to use to draw the picture.
  */
-var Picture = function(id, name, boundsRect, bitmapScale, mode, brushTextureData, externalCanvas) {
+var Picture = function(id, name, boundsRect, bitmapScale, renderer) {
     this.id = id;
     this.name = name;
-    if (mode === undefined) {
-        mode = 'webgl';
-    }
-    this.mode = mode;
+    this.renderer = renderer;
     this.parsedVersion = null;
-    this.brushTextureData = brushTextureData;
 
     this.freed = false; // Freed picture has no bitmaps. They can be regenerated.
 
@@ -39,6 +31,7 @@ var Picture = function(id, name, boundsRect, bitmapScale, mode, brushTextureData
     this.updates = []; // PictureUpdates (state changes used as the basis of serialization and animation).
     this.currentEventAttachment = -1;
     this.currentEvent = null;
+    this.currentEventUntilCoord = undefined;
     this.currentEventMode = PictureEvent.Mode.normal;
     this.currentEventColor = [255, 255, 255];
 
@@ -54,34 +47,16 @@ var Picture = function(id, name, boundsRect, bitmapScale, mode, brushTextureData
     this.memoryUse = this.bitmapWidth() * this.bitmapHeight() * 4;
 
     this.container = null;
-    if (externalCanvas) {
-        if (externalCanvas.width === this.bitmapWidth() && externalCanvas.height === this.bitmapHeight()) {
-            this.canvas = externalCanvas;
-        } else {
-            console.log('externalCanvas supplied to picture has wrong size');
-        }
-    }
-    if (!this.canvas) {
-        this.canvas = document.createElement('canvas');
-        this.canvas.width = this.bitmapWidth();
-        this.canvas.height = this.bitmapHeight();
+    this.canvas = document.createElement('canvas');
+    this.ctx = this.canvas.getContext('2d');
+
+    if (this.renderer.usesWebGl()) {
+        this.gl = this.renderer.gl;
+        this.glManager = this.renderer.glManager;
+        this.renderer.setPicture(this);
     }
 
-    if (this.usesWebGl()) {
-        if (!this.setupGLState()) {
-            this.mode = undefined;
-            return;
-        }
-    } else if (this.mode === 'canvas') {
-        this.ctx = this.canvas.getContext('2d');
-        this.compositor = new CanvasCompositor(this.ctx);
-        this.brushTextures = new CanvasBrushTextures();
-        this.initBrushTextures();
-        this.initRasterizers();
-    } else {
-        this.mode = undefined;
-        return;
-    }
+    this.initRasterizers();
 };
 
 /**
@@ -123,20 +98,15 @@ Picture.prototype.crop = function(boundsRect, bitmapScale) {
     if (bitmapScale === undefined) {
         bitmapScale = this.pictureTransform.scale;
     }
-    this.genericRasterizer.free();
-    this.currentEventRasterizer.free();
 
     this.pictureTransform.scale = bitmapScale;
     this.setBounds(boundsRect);
 
-    this.canvas.width = this.bitmapRect.width();
-    this.canvas.height = this.bitmapRect.height();
-    if (this.usesWebGl()) {
-        this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    }
+    this.renderer.setPicture(this);
+
     this.initRasterizers();
     for (var i = 0; i < this.buffers.length; ++i) {
-        this.buffers[i].crop(this.bitmapRect.width(), this.bitmapRect.height(), this.genericRasterizer);
+        this.buffers[i].crop(this.bitmapRect.width(), this.bitmapRect.height(), this.renderer.sharedRasterizer);
     }
 };
 
@@ -179,84 +149,14 @@ Picture.prototype.markAsSaved = function() {
 };
 
 /**
- * True if WebGL context was initialized but a rendering test produced wrong results.
- */
-Picture.hasFailedWebGLSanity = false;
-
-/**
- * Initialize brush textures to use in rasterizers from the given brush texture data.
- * @protected
- */
-Picture.prototype.initBrushTextures = function() {
-    if (!this.brushTextureData) {
-        return;
-    }
-    for (var i = 0; i < this.brushTextureData.length; ++i) {
-        this.brushTextures.addTexture(this.brushTextureData[i]);
-    }
-};
-
-/**
- * Set up state in an existing gl context.
- * @return {boolean} Whether buffer initialization succeeded.
- */
-Picture.prototype.setupGLState = function() {
-    var useFloatRasterizer = (this.mode === 'webgl' || this.mode === 'no-texdata-webgl');
-    if (useFloatRasterizer && !glUtils.floatFboSupported) {
-        return false;
-    }
-
-    this.gl = Picture.initWebGL(this.canvas);
-    if (!this.gl) {
-        return false;
-    }
-    this.glManager = glStateManager(this.gl);
-    this.glManager.useQuadVertexBuffer(); // All drawing is done using the same vertex array
-    this.loseContext = this.gl.getExtension('WEBGL_lose_context');
-
-    this.brushTextures = new GLBrushTextures(this.gl, this.glManager);
-    this.initBrushTextures();
-
-    if (useFloatRasterizer) {
-        if (this.mode === 'webgl') {
-            this.glRasterizerConstructor = GLFloatTexDataRasterizer;
-        } else {
-            // TODO: assert(this.mode === 'no-texdata-webgl');
-            this.glRasterizerConstructor = GLFloatRasterizer;
-        }
-    } else {
-        this.glRasterizerConstructor = GLDoubleBufferedRasterizer;
-    }
-
-    this.texBlitProgram = this.glManager.shaderProgram(blitShader.blitSrc,
-                                                       blitShader.blitVertSrc,
-                                                       {'uSrcTex': 'tex2d'});
-    this.rectBlitProgram = this.glManager.shaderProgram(blitShader.blitSrc,
-                                                        blitShader.blitScaledTranslatedVertSrc,
-                                                        {'uSrcTex': 'tex2d', 'uScale': '2fv', 'uTranslate': '2fv'});
-
-    if (!this.initRasterizers()) {
-        Picture.hasFailedWebGLSanity = true;
-        console.log('WebGL accelerated rasterizer did not pass sanity test ' +
-                    '(mode ' + this.mode + '). Update your graphics drivers ' +
-                    'or try switching browsers if possible.');
-        return false;
-    }
-
-    this.compositor = new GLCompositor(this.glManager, this.gl,
-                                       glUtils.maxTextureUnits);
-    return true;
-};
-
-/**
  * Kill WebGL context if one exists to free as many resources as possible.
  * Meant mainly for testing.
  */
 Picture.prototype.destroy = function() {
     if (this.gl) {
         this.gl.finish();
-        if (this.loseContext) {
-            this.loseContext.loseContext();
+        if (this.renderer.loseContext) {
+            this.renderer.loseContext.loseContext();
         }
     }
 };
@@ -408,36 +308,6 @@ Picture.prototype.setBufferOpacity = function(bufferId, opacity) {
 };
 
 /**
- * Create a Picture object.
- * @param {number} id Picture's unique id number.
- * @param {string} name Name of the picture. May be null.
- * @param {Rect} boundsRect Picture bounds in picture coordinates. Left and top bounds may be negative.
- * @param {number} bitmapScale Scale for rasterizing the picture. Events that
- * are pushed to this picture get this scale applied to them.
- * @param {Array.<string>} modesToTry Modes to try to initialize the picture.
- * Can contain either 'webgl', 'no-texdata-webgl', 'no-float-webgl' or 'canvas'.
- * Modes are tried in the order they are in the array.
- * @param {Array.<HTMLImageElement|HTMLCanvasElement>=} brushTextureData Set of brush textures to use. Can be undefined
- * if no textures are needed.
- * @return {Picture} The created picture or null if one couldn't be created.
- */
-Picture.create = function(id, name, boundsRect, bitmapScale, modesToTry, brushTextureData) {
-    var i = 0;
-    var pic = null;
-    while (i < modesToTry.length && pic === null) {
-        var mode = modesToTry[i];
-        if (glUtils.supportsTextureUnits(4) || mode === 'canvas') {
-            pic = new Picture(id, name, boundsRect, bitmapScale, mode, brushTextureData);
-            if (pic.mode === undefined) {
-                pic = null;
-            }
-        }
-        i++;
-    }
-    return pic;
-};
-
-/**
  * Create a picture object by parsing a serialization of it. Note that the
  * picture might not be immediately ready after parsing, but might instead be
  * freed when this function returns and take a while to load imported bitmaps,
@@ -449,16 +319,12 @@ Picture.create = function(id, name, boundsRect, bitmapScale, modesToTry, brushTe
  * the Picture object at the end, separated by line "metadata".
  * @param {number} bitmapScale Scale for rasterizing the picture. Events that
  * are pushed to this picture get this scale applied to them.
- * @param {Array.<string>} modesToTry Modes to try to initialize the picture.
- * Can contain either 'webgl', 'no-texdata-webgl', 'no-float-webgl' or 'canvas'.
- * Modes are tried in the order they are in the array.
- * @param {Array.<HTMLImageElement|HTMLCanvasElement>=} brushTextureData Set of brush textures to use. Can be undefined
- * if no textures are needed.
+ * @param {PictureRenderer} renderer Renderer to use to draw the picture.
  * @param {function(Object)} finishedCallback Function to be called asynchronously when loading has finished.
  * The function will be called with one parameter, an object containing key 'picture' for the created picture,
  * and key 'metadata' for the metadata lines.
  */
-Picture.parse = function(id, serialization, bitmapScale, modesToTry, brushTextureData, finishedCallback) {
+Picture.parse = function(id, serialization, bitmapScale, renderer, finishedCallback) {
     var eventStrings = serialization.split(/\r?\n/);
     var pictureParams = eventStrings[0].split(' ');
     var version = 0;
@@ -492,8 +358,7 @@ Picture.parse = function(id, serialization, bitmapScale, modesToTry, brushTextur
             name = window.atob(pictureParams[nameIndex + 1]);
         }
     }
-    var pic = Picture.create(id, name, new Rect(left, left + width, top, top + height),
-                             bitmapScale, modesToTry, brushTextureData);
+    var pic = new Picture(id, name, new Rect(left, left + width, top, top + height), bitmapScale, renderer);
     pic.parsedVersion = version;
 
     // First parse all buffers without rasterizing, then rasterize after rasterImport events are loaded.
@@ -645,7 +510,7 @@ Picture.copy = function(pic, finishedCallback, bitmapScale) {
     }
     var serialization = pic.serialize();
     Picture.parse(pic.id, serialization, bitmapScale,
-                  [pic.mode], pic.brushTextureData, function(parsed) {
+                  pic.renderer, function(parsed) {
         parsed.picture.setCurrentEventAttachment(pic.currentEventAttachment);
         finishedCallback(parsed.picture);
     });
@@ -740,8 +605,9 @@ Picture.prototype.setActiveSession = function(sid) {
  */
 Picture.prototype.createBrushEvent = function(color, flow, opacity, radius,
                                               textureId, softness, mode) {
-    var event = new BrushEvent(this.activeSid, this.activeSessionEventId, false,
-                               color, flow, opacity, radius, textureId, softness, mode);
+    var event = new BrushEvent();
+    event.init(this.activeSid, this.activeSessionEventId, false,
+               color, flow, opacity, radius, textureId, softness, mode);
     this.activeSessionEventId++;
     return event;
 };
@@ -763,9 +629,9 @@ Picture.prototype.createBrushEvent = function(color, flow, opacity, radius,
  */
 Picture.prototype.createScatterEvent = function(color, flow, opacity, radius,
                                                 textureId, softness, mode) {
-    var event = new ScatterEvent(this.activeSid, this.activeSessionEventId,
-                                 false, color, flow, opacity, radius, textureId, softness,
-                                 mode);
+    var event = new ScatterEvent();
+    event.init(this.activeSid, this.activeSessionEventId,
+               false, color, flow, opacity, radius, textureId, softness, mode);
     this.activeSessionEventId++;
     return event;
 };
@@ -882,48 +748,6 @@ Picture.prototype.createEventHideEvent = function(hiddenSid,
 };
 
 /**
- * @param {HTMLCanvasElement} canvas Canvas to use for rasterization.
- * @param {boolean=} debugGL True to log every WebGL call made on the context. Defaults to false.
- * @return {WebGLRenderingContext} Context to use or null if unsuccessful.
- */
-Picture.initWebGL = function(canvas, debugGL) {
-    if (debugGL === undefined) {
-        debugGL = false;
-    }
-    var contextAttribs = {
-        antialias: false,
-        stencil: false,
-        depth: false,
-        premultipliedAlpha: false
-    };
-    var gl = glUtils.initGl(canvas, contextAttribs, 4);
-    if (!gl) {
-        return null;
-    }
-    if (debugGL) {
-        var logGLCall = function(functionName, args) {
-            console.log('gl.' + functionName + '(' + WebGLDebugUtils.glFunctionArgsToString(functionName, args) + ');');
-        };
-        gl = WebGLDebugUtils.makeDebugContext(gl, undefined, logGLCall);
-    }
-    gl.getExtension('OES_texture_float');
-
-    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    gl.enable(gl.BLEND);
-    gl.enable(gl.SCISSOR_TEST); // scissor rect is initially set to canvas size.
-    gl.hint(gl.GENERATE_MIPMAP_HINT, gl.NICEST);
-    return gl;
-};
-
-/**
- * @return {boolean} Does the picture use WebGL?
- */
-Picture.prototype.usesWebGl = function() {
-    return (this.mode === 'webgl' || this.mode === 'no-float-webgl' ||
-            this.mode === 'no-texdata-webgl');
-};
-
-/**
  * Set a containing widget for this picture. The container is expected to add
  * what's returned from pictureElement() under a displayed HTML element.
  * @param {Object} container The container.
@@ -941,19 +765,10 @@ Picture.prototype.pictureElement = function() {
 
 /**
  * Initialize rasterizers.
- * @return {boolean} True on success.
  * @protected
  */
 Picture.prototype.initRasterizers = function() {
-    this.currentEventRasterizer = this.createRasterizer();
-    if (!this.currentEventRasterizer.checkSanity()) {
-        this.currentEventRasterizer.free();
-        return false;
-    }
-    this.genericRasterizer = this.createRasterizer();
-    this.memoryUse += this.currentEventRasterizer.getMemoryBytes();
-    this.memoryUse += this.genericRasterizer.getMemoryBytes();
-    return true;
+    this.renderer.setSharedRasterizerSize(this.bitmapWidth(), this.bitmapHeight());
 };
 
 /**
@@ -1049,7 +864,7 @@ Picture.prototype.regenerateBuffer = function(buffer) {
     if (buffer.freed) {
         var memIncrease = buffer.getMemoryNeededForReservingStates();
         this.stayWithinMemoryBudget(memIncrease);
-        buffer.regenerate(true, this.genericRasterizer);
+        buffer.regenerate(true, this.renderer.sharedRasterizer);
         this.memoryUse += memIncrease;
     }
 };
@@ -1063,12 +878,13 @@ Picture.prototype.regenerateBuffer = function(buffer) {
  */
 Picture.prototype.createBuffer = function(createEvent, hasUndoStates) {
     var buffer;
-    if (this.usesWebGl()) {
-        buffer = new GLBuffer(this.gl, this.glManager, this.compositor,
-                              this.texBlitProgram, this.rectBlitProgram, createEvent,
+    if (this.renderer.usesWebGl()) {
+        buffer = new GLBuffer(this.gl, this.glManager, this.renderer.compositor,
+                              this.renderer.texBlitProgram, this.renderer.rectBlitProgram, createEvent,
                               this.bitmapWidth(), this.bitmapHeight(), this.pictureTransform,
                               hasUndoStates, this.freed);
-    } else if (this.mode === 'canvas') {
+    } else {
+        // TODO: assert(this.renderer.mode === 'canvas');
         buffer = new CanvasBuffer(createEvent, this.bitmapWidth(),
                                   this.bitmapHeight(), this.pictureTransform, hasUndoStates, this.freed);
     }
@@ -1107,31 +923,6 @@ Picture.prototype.createBuffer = function(createEvent, hasUndoStates) {
         }
     }
     return buffer;
-};
-
-/**
- * Create a single rasterizer using the mode specified for this picture.
- * @param {boolean=} saveMemory Choose a rasterizer that uses the least possible
- * memory as opposed to one that has the best performance. Defaults to false.
- * @return {BaseRasterizer} The rasterizer.
- */
-Picture.prototype.createRasterizer = function(saveMemory) {
-    if (saveMemory === undefined) {
-        saveMemory = false;
-    }
-    if (this.glRasterizerConstructor !== undefined) {
-        if (saveMemory) {
-            return new GLDoubleBufferedRasterizer(this.gl, this.glManager,
-                                                  this.bitmapWidth(),
-                                                  this.bitmapHeight(), this.brushTextures);
-        } else {
-            return new this.glRasterizerConstructor(this.gl, this.glManager,
-                                                    this.bitmapWidth(),
-                                                    this.bitmapHeight(), this.brushTextures);
-        }
-    } else {
-        return new Rasterizer(this.bitmapWidth(), this.bitmapHeight(), this.brushTextures);
-    }
 };
 
 /**
@@ -1196,7 +987,7 @@ Picture.prototype.pushEvent = function(targetBufferId, event) {
             var bufferIndex = this.findBufferIndex(this.buffers,
                                                    event.bufferId);
             // TODO: assert(bufferIndex >= 0);
-            this.buffers[bufferIndex].pushEvent(event, this.genericRasterizer);
+            this.buffers[bufferIndex].pushEvent(event, this.renderer.sharedRasterizer);
             this.afterRemove(this.buffers[bufferIndex]);
             return;
         } else if (event.eventType === 'bufferMove') {
@@ -1209,15 +1000,15 @@ Picture.prototype.pushEvent = function(targetBufferId, event) {
         }
     }
     var targetBuffer = this.findBuffer(targetBufferId);
-    if (this.currentEventRasterizer.drawEvent === event) {
-        targetBuffer.pushEvent(event, this.currentEventRasterizer);
+    if (this.renderer.currentEventRasterizer.drawEvent === event) {
+        targetBuffer.pushEvent(event, this.renderer.currentEventRasterizer);
     } else {
         if (event.eventType === 'bufferMerge') {
             this.undummify(event);
             // TODO: assert(event.mergedBuffer !== targetBuffer);
-            targetBuffer.pushEvent(event, this.genericRasterizer);
+            targetBuffer.pushEvent(event, this.renderer.sharedRasterizer);
         } else {
-            targetBuffer.pushEvent(event, this.genericRasterizer);
+            targetBuffer.pushEvent(event, this.renderer.sharedRasterizer);
         }
     }
 };
@@ -1241,7 +1032,7 @@ Picture.prototype.insertEvent = function(targetBufferId, event) {
     if (event.eventType === 'bufferRemove') {
         var bufferIndex = this.findBufferIndex(this.buffers, event.bufferId);
         // TODO: assert(bufferIndex >= 0);
-        this.buffers[bufferIndex].insertEvent(event, this.genericRasterizer);
+        this.buffers[bufferIndex].insertEvent(event, this.renderer.sharedRasterizer);
         this.afterRemove(this.buffers[bufferIndex]);
         return;
     }
@@ -1249,9 +1040,9 @@ Picture.prototype.insertEvent = function(targetBufferId, event) {
     if (event.eventType === 'bufferMerge') {
         this.undummify(event);
         // TODO: assert(event.mergedBuffer !== targetBuffer);
-        targetBuffer.insertEvent(event, this.genericRasterizer);
+        targetBuffer.insertEvent(event, this.renderer.sharedRasterizer);
     } else {
-        targetBuffer.insertEvent(event, this.genericRasterizer);
+        targetBuffer.insertEvent(event, this.renderer.sharedRasterizer);
     }
 };
 
@@ -1358,7 +1149,7 @@ Picture.prototype.undoEventIndex = function(buffer, eventIndex) {
     // Disallowing undoing merge events from merged buffers.
     // TODO: Consider lifting undo restrictions from merged buffers.
     var allowUndoMerge = !buffer.isMerged();
-    var undone = buffer.undoEventIndex(eventIndex, this.genericRasterizer,
+    var undone = buffer.undoEventIndex(eventIndex, this.renderer.sharedRasterizer,
                                        allowUndoMerge);
     if (undone) {
         if (eventIndex === 0) {
@@ -1428,16 +1219,16 @@ Picture.prototype.redoEventSessionId = function(sid, sessionEventId) {
                                              event.mergedBuffer.id);
                     // TODO: assert(mergedBufferIndex !== j);
                     // TODO: assert(!event.mergedBuffer.isDummy);
-                    this.buffers[j].redoEventIndex(i, this.genericRasterizer);
+                    this.buffers[j].redoEventIndex(i, this.renderer.sharedRasterizer);
                 } else if (event.eventType === 'bufferRemove') {
-                    this.buffers[j].redoEventIndex(i, this.genericRasterizer);
+                    this.buffers[j].redoEventIndex(i, this.renderer.sharedRasterizer);
                     this.afterRemove(this.buffers[j]);
                 } else {
                     if (i === 0) {
                         // TODO: assert(event.eventType === 'bufferAdd');
                         this.regenerateBuffer(this.buffers[j]);
                     }
-                    this.buffers[j].redoEventIndex(i, this.genericRasterizer);
+                    this.buffers[j].redoEventIndex(i, this.renderer.sharedRasterizer);
                 }
             }
             return true;
@@ -1464,7 +1255,7 @@ Picture.prototype.removeEventSessionId = function(sid, sessionEventId) {
                 undone = this.undoEventIndex(this.buffers[j], i);
             }
             if (undone) {
-                this.buffers[j].removeEventIndex(i, this.genericRasterizer);
+                this.buffers[j].removeEventIndex(i, this.renderer.sharedRasterizer);
                 return true;
             } else {
                 return false; // The event was not undoable
@@ -1482,10 +1273,7 @@ Picture.prototype.removeEventSessionId = function(sid, sessionEventId) {
  */
 Picture.prototype.setCurrentEvent = function(cEvent) {
     this.currentEvent = cEvent;
-    if (this.currentEvent) {
-        this.currentEventRasterizer.resetClip();
-        this.currentEvent.drawTo(this.currentEventRasterizer, this.pictureTransform);
-    }
+    this.currentEventUntilCoord = undefined;
     this.updateCurrentEventMode();
 };
 
@@ -1498,10 +1286,7 @@ Picture.prototype.setCurrentEvent = function(cEvent) {
  */
 Picture.prototype.setCurrentAnimationEvent = function(cEvent, untilCoord) {
     this.currentEvent = cEvent;
-    if (this.currentEvent) {
-        this.currentEventRasterizer.resetClip();
-        this.currentEvent.drawTo(this.currentEventRasterizer, this.pictureTransform, untilCoord);
-    }
+    this.currentEventUntilCoord = untilCoord;
     this.updateCurrentEventMode();
 };
 
@@ -1520,7 +1305,7 @@ Picture.prototype.moveEvent = function(targetBufferId, sourceBufferId, event) {
     var src = this.findBuffer(sourceBufferId);
     var eventIndex = src.eventIndexBySessionId(event.sid, event.sessionEventId);
     if (eventIndex >= 0) {
-        src.removeEventIndex(eventIndex, this.genericRasterizer);
+        src.removeEventIndex(eventIndex, this.renderer.sharedRasterizer);
     }
     this.pushEvent(targetBufferId, event);
 };
@@ -1528,37 +1313,22 @@ Picture.prototype.moveEvent = function(targetBufferId, sourceBufferId, event) {
 /**
  * Display the latest updated buffers of this picture. Call after doing changes
  * to any of the picture's buffers.
+ * @param {CanvasRenderingContext2D?} ctx Context to draw the picture to. If undefined, the picture will be displayed
+ * on its own element.
  */
-Picture.prototype.display = function() {
+Picture.prototype.display = function(ctx) {
     if (this.animating) {
         return;
     }
-    if (this.usesWebGl()) {
-        this.glManager.useFbo(null);
-        this.gl.scissor(0, 0, this.bitmapWidth(), this.bitmapHeight());
+    this.renderer.display(this);
+    if (ctx === undefined) {
+        this.canvas.width = this.bitmapWidth();
+        this.canvas.height = this.bitmapHeight();
+        ctx = this.ctx;
     }
-    for (var i = 0; i < this.buffers.length; ++i) {
-        if (this.buffers[i].isComposited()) {
-            this.compositor.pushBuffer(this.buffers[i]);
-            if (this.currentEventAttachment === this.buffers[i].id) {
-                if (this.currentEvent) {
-                    this.compositor.pushRasterizer(this.currentEventRasterizer,
-                                                   this.currentEventColor,
-                                                   this.currentEvent.opacity,
-                                                   this.currentEventMode,
-                             this.currentEvent.getBoundingBox(this.bitmapRect, this.pictureTransform));
-                } else {
-                    // Even if there's no this.currentEvent at the moment, push
-                    // so that the GLCompositor can avoid extra shader changes.
-                    this.compositor.pushRasterizer(this.currentEventRasterizer,
-                                                   [0, 0, 0], 0,
-                                                   this.currentEventMode,
-                                                   null);
-                }
-            }
-        }
-    }
-    this.compositor.flush();
+    // TODO: Would be nice to get rid of this extra copy. That should be easy once browsers have better APIs for
+    // offscreen renderíng.
+    ctx.drawImage(this.renderer.canvas, 0, 0);
 };
 
 /**
@@ -1568,7 +1338,7 @@ Picture.prototype.regenerate = function() {
     this.freed = false;
     for (var i = 0; i < this.buffers.length; ++i) {
         if (this.buffers[i].freed) {
-            this.buffers[i].regenerate(true, this.genericRasterizer);
+            this.buffers[i].regenerate(true, this.renderer.sharedRasterizer);
         }
     }
 };
@@ -1622,8 +1392,7 @@ Picture.prototype.animate = function(speed, animationFinishedCallBack) {
     }
     var animationSpeed = speed;
 
-    var animationPicture = new Picture(-1, 'animationPic', this.boundsRect, this.pictureTransform.scale, this.mode,
-                                       this.brushTextureData, this.canvas);
+    var animationPicture = new Picture(-1, 'animationPic', this.boundsRect, this.pictureTransform.scale, this.renderer);
 
     var updateT = 0;
     var update = null;
@@ -1673,14 +1442,14 @@ Picture.prototype.animate = function(speed, animationFinishedCallBack) {
                 }
                 var untilCoord = picEvent.coords.length * updateT;
                 untilCoord = Math.ceil(untilCoord / 3) * 3;
-                picEvent.drawTo(that.animationData.picture.currentEventRasterizer, that.pictureTransform, untilCoord);
+                that.animationData.picture.setCurrentAnimationEvent(picEvent, untilCoord);
 
-                that.animationData.picture.display();
+                that.animationData.picture.display(that.ctx);
                 window.requestAnimationFrame(animationFrame);
             } else {
                 pushAnimationUpdate();
 
-                that.animationData.picture.display();
+                that.animationData.picture.display(that.ctx);
                 window.setTimeout(animationFrame, 50);
             }
         } else {
@@ -1702,7 +1471,7 @@ Picture.prototype.scrubAnimation = function(t) {
         this.animationData.pushUpdate();
     }
     if (this.animating) {
-        this.animationData.picture.display();
+        this.animationData.picture.display(this.ctx);
     }
 };
 
@@ -1772,7 +1541,7 @@ Picture.prototype.blamePixel = function(coords) {
  */
 Picture.prototype.getPixelRGBA = function(coords) {
     this.display();
-    if (this.usesWebGl()) {
+    if (this.renderer.usesWebGl()) {
         var buffer = new ArrayBuffer(4);
         var pixelData = new Uint8Array(buffer);
         var glX = Math.min(Math.floor(coords.x), this.bitmapWidth() - 1);
@@ -1781,8 +1550,8 @@ Picture.prototype.getPixelRGBA = function(coords) {
                            pixelData);
         return pixelData;
     } else {
-        return this.ctx.getImageData(Math.floor(coords.x),
-                                     Math.floor(coords.y), 1, 1).data;
+        return this.renderer.ctx.getImageData(Math.floor(coords.x),
+                                              Math.floor(coords.y), 1, 1).data;
     }
 };
 
@@ -1814,3 +1583,4 @@ Picture.prototype.toBlob = function(callback) {
     // this.display();
     // this.canvas.toBlob(callback);
 };
+

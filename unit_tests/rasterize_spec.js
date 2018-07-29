@@ -96,7 +96,7 @@ describe('Rasterizing system', function() {
             canvas.width = width;
             canvas.height = height;
         }
-        return Picture.initWebGL(canvas, debugGLSettingFromURL());
+        return PictureRenderer.initWebGL(canvas, debugGLSettingFromURL());
     }
 
     function testBaseRasterizerProperties(testRasterizer, w, h) {
@@ -474,20 +474,20 @@ describe('Rasterizing system', function() {
             var glManager = glStateManager(gl);
             glManager.useQuadVertexBuffer();
             if (brushTextureData === undefined) {
-                return new GLDoubleBufferedRasterizer(gl, glManager, width, height, null);
+                return GLDoubleBufferedRasterizer.create(gl, glManager, width, height, null);
             } else {
                 var brushTextures = new GLBrushTextures(gl, glManager);
                 for (var i = 0; i < brushTextureData.length; ++i) {
                     brushTextures.addTexture(brushTextureData[i]);
                 }
-                return new GLDoubleBufferedRasterizer(gl, glManager, width, height, brushTextures);
+                return GLDoubleBufferedRasterizer.create(gl, glManager, width, height, brushTextures);
             }
         };
 
         commonRasterizerTests(createRasterizer);
     });
 
-    describe('GLFloatRasterizer', function() {
+    describe('GLFloatRasterizer in non-dynamic mode', function() {
         var createRasterizer = function(width, height, brushTextureData) {
             if (width === undefined) {
                 width = 123;
@@ -499,20 +499,20 @@ describe('Rasterizing system', function() {
             var glManager = glStateManager(gl);
             glManager.useQuadVertexBuffer();
             if (brushTextureData === undefined) {
-                return new GLFloatRasterizer(gl, glManager, width, height, null);
+                return GLFloatRasterizer.create(gl, glManager, width, height, null, false);
             } else {
                 var brushTextures = new GLBrushTextures(gl, glManager);
                 for (var i = 0; i < brushTextureData.length; ++i) {
                     brushTextures.addTexture(brushTextureData[i]);
                 }
-                return new GLFloatRasterizer(gl, glManager, width, height, brushTextures);
+                return GLFloatRasterizer.create(gl, glManager, width, height, brushTextures, false);
             }
         };
 
         commonRasterizerTests(createRasterizer);
     });
 
-    describe('GLFloatTexDataRasterizer', function() {
+    describe('GLFloatRasterizer in dynamic mode', function() {
         var createRasterizer = function(width, height, brushTextureData) {
             if (width === undefined) {
                 width = 123;
@@ -524,13 +524,13 @@ describe('Rasterizing system', function() {
             var glManager = glStateManager(gl);
             glManager.useQuadVertexBuffer();
             if (brushTextureData === undefined) {
-                return new GLFloatTexDataRasterizer(gl, glManager, width, height, null);
+                return GLFloatRasterizer.create(gl, glManager, width, height, null, true);
             } else {
                 var brushTextures = new GLBrushTextures(gl, glManager);
                 for (var i = 0; i < brushTextureData.length; ++i) {
                     brushTextures.addTexture(brushTextureData[i]);
                 }
-                return new GLFloatTexDataRasterizer(gl, glManager, width, height, brushTextures);
+                return GLFloatRasterizer.create(gl, glManager, width, height, brushTextures, true);
             }
         };
 

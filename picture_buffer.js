@@ -824,6 +824,7 @@ PictureBuffer.prototype.isListed = function() {
 /**
  * A PictureBuffer implementation with a canvas backing for the bitmap.
  * @constructor
+ * @extends {PictureBuffer}
  * @param {BufferAddEvent} createEvent Event that initializes the buffer.
  * @param {number} width Width of the buffer in pixels. Must be an integer.
  * @param {number} height Height of the buffer in pixels. Must be an integer.
@@ -1119,6 +1120,7 @@ CanvasBuffer.prototype.bytesPerPixel = function() {
 /**
  * A PictureBuffer implementation with a GL texture backing for the bitmap.
  * @constructor
+ * @extends {PictureBuffer}
  * @param {WebGLRenderingContext} gl The rendering context.
  * @param {Object} glManager The state manager returned by glStateManager() in
  * utilgl.
@@ -1247,6 +1249,7 @@ GLBuffer.prototype.updateClip = function() {
  */
 GLBuffer.prototype.drawRasterizerWithColor = function(raster, color, opacity,
                                                       mode) {
+    this.gl.viewport(0, 0, this.width(), this.height());
     this.updateClip();
     if (!this.hasAlpha && mode === PictureEvent.Mode.erase) {
         mode = PictureEvent.Mode.normal;
@@ -1258,9 +1261,11 @@ GLBuffer.prototype.drawRasterizerWithColor = function(raster, color, opacity,
                                        this.height());
     this.glManager.useFboTex(helper);
     this.texBlitUniforms['uSrcTex'] = this.tex;
+
     this.glManager.drawFullscreenQuad(this.texBlitProgram, this.texBlitUniforms);
 
     this.glManager.useFboTex(this.tex);
+    this.compositor.setTargetDimensions(this.width(), this.height());
     this.compositor.pushBufferTex(helper, 1.0, false);
     this.compositor.pushRasterizer(raster, color, opacity, mode, null);
     this.compositor.flush();
@@ -1273,6 +1278,7 @@ GLBuffer.prototype.drawRasterizerWithColor = function(raster, color, opacity,
  * @param {Rect} rect The extents of the image in this buffer's coordinates.
  */
 GLBuffer.prototype.drawImage = function(img, rect) {
+    this.gl.viewport(0, 0, this.width(), this.height());
     var imageTex = this.gl.createTexture();
     this.gl.bindTexture(this.gl.TEXTURE_2D, imageTex);
     this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.LINEAR);
@@ -1298,6 +1304,7 @@ GLBuffer.prototype.drawImage = function(img, rect) {
  * @protected
  */
 GLBuffer.prototype.drawBuffer = function(buffer, opacity) {
+    this.gl.viewport(0, 0, this.width(), this.height());
     this.updateClip();
     // Copy into helper texture from this.tex, then use compositor to render
     // that blended with the contents of the buffer back to this.tex.
@@ -1307,6 +1314,7 @@ GLBuffer.prototype.drawBuffer = function(buffer, opacity) {
     this.glManager.drawFullscreenQuad(this.texBlitProgram,
                                       this.texBlitUniforms);
     this.glManager.useFboTex(this.tex);
+    this.compositor.setTargetDimensions(this.width(), this.height());
     this.compositor.pushBufferTex(helper, 1.0, false);
     this.compositor.pushBufferTex(buffer.tex, opacity, false);
     this.compositor.flush();

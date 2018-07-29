@@ -83,7 +83,8 @@ var runTest = function() {
 
     var w = 1024;
     var brushTextureData = [testTextureCanvas()];
-    var testPic = Picture.create(0, null, new Rect(0, w, 0, w), 1.0, [pictureMode], brushTextureData);
+    var testPic = new Picture(0, null, new Rect(0, w, 0, w), 1.0,
+                              PictureRenderer.create([pictureMode], brushTextureData));
     if (testPic === null) {
         testLog('Could not test mode ' + pictureMode);
         return undefined;
@@ -120,7 +121,7 @@ var init = function() {
         var option = select.options[select.selectedIndex];
         return option.value;
     }
-    var allModes = ['webgl', 'no-texdata-webgl', 'no-float-webgl', 'canvas'];
+    var allModes = ['webgl', 'no-dynamic-webgl', 'no-float-webgl', 'canvas'];
     selection('mode', allModes);
     var textureIds = ['0', '1'];
     var p = document.createElement('span');

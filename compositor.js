@@ -5,17 +5,52 @@
 'use strict';
 
 /**
+ * A compositor.
+ * @interface
+ */
+var Compositor = function() {};
+
+/**
+ * Ensure that results of all queued draw operations are written into the
+ * framebuffer.
+ */
+Compositor.prototype.flush = function() {};
+
+/**
+ * Add a buffer to composit to the target context.
+ * @param {PictureBuffer} buffer Buffer to composit.
+ */
+Compositor.prototype.pushBuffer = function(buffer) {};
+
+/**
+ * Add a rasterizer to composit to the framebuffer. In case the rasterizer is larger than the target,
+ * it is aligned to the top left corner.
+ * @param {BaseRasterizer} rasterizer Rasterizer to merge to the last pushed
+ * buffer.
+ * @param {Uint8Array|Array.<number>} color Color to color the rasterizer with.
+ * @param {number} opacity Opacity to use for blending the rasterizer.
+ * @param {PictureEvent.Mode} mode Blending mode to use.
+ * @param {Rect} boundingBox Bounding box for the rasterizer.
+ */
+Compositor.prototype.pushRasterizer = function(rasterizer, color, opacity, mode, boundingBox) {};
+
+/**
+ * Set the dimensions of the target buffer that is being composited to.
+ * Must be called before pushing things to composit.
+ * @param {number} width Width in pixels.
+ * @param {number} height Height in pixels.
+ */
+Compositor.prototype.setTargetDimensions = function(width, height) {};
+
+/**
  * A compositor for buffers that have canvas backing.
  * @param {CanvasRenderingContext2D} ctx Target rendering context.
  * @constructor
+ * @implements {Compositor}
  */
 var CanvasCompositor = function(ctx) {
     this.ctx = ctx;
-    this.width = this.ctx.canvas.width;
-    this.height = this.ctx.canvas.height;
     this.compositingCanvas = document.createElement('canvas');
-    this.compositingCanvas.width = this.width;
-    this.compositingCanvas.height = this.height;
     this.compositingCtx = this.compositingCanvas.getContext('2d');
 
     this.prepare();
@@ -53,15 +88,15 @@ CanvasCompositor.prototype.pushBuffer = function(buffer) {
 };
 
 /**
- * Add a rasterizer to composit to the target context.
+ * Add a rasterizer to composit to the target context. In case the rasterizer is larger than the target,
+ * it is aligned to the top left corner.
  * @param {Rasterizer} rasterizer Rasterizer to merge to the last pushed buffer.
  * @param {Uint8Array|Array.<number>} color Color to color the rasterizer with.
  * @param {number} opacity Opacity to use for blending the rasterizer.
  * @param {PictureEvent.Mode} mode Blending mode to use.
  * @param {Rect} boundingBox Bounding box for the rasterizer.
  */
-CanvasCompositor.prototype.pushRasterizer = function(rasterizer, color, opacity,
-                                                     mode, boundingBox) {
+CanvasCompositor.prototype.pushRasterizer = function(rasterizer, color, opacity, mode, boundingBox) {
     if (opacity === 0 || boundingBox === null) {
         return;
     }
@@ -71,12 +106,25 @@ CanvasCompositor.prototype.pushRasterizer = function(rasterizer, color, opacity,
 };
 
 /**
+ * Set the dimensions of the target buffer that is being composited to.
+ * Must be called before pushing things to composit.
+ * @param {number} width Width in pixels.
+ * @param {number} height Height in pixels.
+ */
+CanvasCompositor.prototype.setTargetDimensions = function(width, height) {
+    this.compositingCanvas.width = width;
+    this.compositingCanvas.height = height;
+};
+
+/**
  * Ensure that results of all queued draw operations are written into the target
  * context.
  */
 CanvasCompositor.prototype.flush = function() {
+    var width = this.compositingCanvas.width;
+    var height = this.compositingCanvas.height;
     if (this.needsClear) {
-        this.ctx.clearRect(0, 0, this.width, this.height);
+        this.ctx.clearRect(0, 0, width, height);
         this.needsClear = false;
     }
     var i = 0;
@@ -88,7 +136,7 @@ CanvasCompositor.prototype.flush = function() {
             ++i;
         } else {
             if (this.pending[i].buffer.hasAlpha) {
-                this.compositingCtx.clearRect(0, 0, this.width, this.height);
+                this.compositingCtx.clearRect(0, 0, width, height);
             }
             var opacity = this.pending[i].buffer.opacity();
             this.compositingCtx.drawImage(this.pending[i].buffer.canvas, 0, 0);
@@ -96,7 +144,7 @@ CanvasCompositor.prototype.flush = function() {
             ++i;
             while (i < this.pending.length &&
                  this.pending[i].type === CanvasCompositor.Element.rasterizer) {
-                var clipRect = new Rect(0, this.width, 0, this.height);
+                var clipRect = new Rect(0, width, 0, height);
                 clipRect.intersectRect(this.pending[i].boundingBox);
                 CanvasBuffer.drawRasterizer(sourceCtx,
                                             this.compositingCtx,
@@ -124,6 +172,7 @@ CanvasCompositor.prototype.flush = function() {
  * @param {number} multitexturingLimit Maximum number of textures to access in
  * one fragment shader pass.
  * @constructor
+ * @implements {Compositor}
  */
 var GLCompositor = function(glManager, gl, multitexturingLimit) {
     this.glManager = glManager;
@@ -138,7 +187,10 @@ var GLCompositor = function(glManager, gl, multitexturingLimit) {
  * Prepare for another round of compositing.
  * @protected
  */
-GLCompositor.prototype.prepare = CanvasCompositor.prototype.prepare;
+GLCompositor.prototype.prepare = function() {
+    this.pending = [];
+    this.needsClear = true;
+};
 
 /**
  * Add a buffer to composit to the framebuffer.
@@ -171,7 +223,8 @@ GLCompositor.prototype.pushBufferTex = function(tex, opacity, isOpaque) {
 };
 
 /**
- * Add a rasterizer to composit to the framebuffer.
+ * Add a rasterizer to composit to the framebuffer. In case the rasterizer is larger than the target,
+ * it is aligned to the top left corner.
  * @param {BaseRasterizer} rasterizer Rasterizer to merge to the last pushed
  * buffer.
  * @param {Uint8Array|Array.<number>} color Color to color the rasterizer with.
@@ -195,6 +248,17 @@ GLCompositor.prototype.pushRasterizer = function(rasterizer, color, opacity,
     this.pending.push({type: CanvasCompositor.Element.rasterizer,
                        rasterizer: rasterizer, color: color, opacity: opacity,
                        mode: mode, boundingBox: boundingBox});
+};
+
+/**
+ * Set the dimensions of the target buffer that is being composited to.
+ * Must be called before pushing things to composit.
+ * @param {number} width Width in pixels.
+ * @param {number} height Height in pixels.
+ */
+GLCompositor.prototype.setTargetDimensions = function(width, height) {
+    this.targetWidth = width;
+    this.targetHeight = height;
 };
 
 /**
@@ -248,6 +312,10 @@ GLCompositor.prototype.flushInternal = function(flushed) {
             compositingUniforms['uOpacity' + i] = flushed[i].opacity;
         } else {
             compositingUniforms['uLayer' + i] = flushed[i].rasterizer.getTex();
+            var scale = 'uLayer' + i + 'Scale';
+            compositingUniforms[scale] =
+                        [this.targetWidth / flushed[i].rasterizer.width,
+                        this.targetHeight / flushed[i].rasterizer.height];
             var color = flushed[i].color;
             compositingUniforms['uColor' + i] =
                         [color[0] / 255, color[1] / 255, color[2] / 255,
